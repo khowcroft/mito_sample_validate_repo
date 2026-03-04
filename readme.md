@@ -3,15 +3,17 @@ Activate environment mito_validate_vcfs_matrix
 Note: for the database prefix --db: if the file name is mitochondria_sample_validation/final/output/add_to_none_test_meta.json, the prefix is add_to_none_test
 
 ## Create Database:
-Takes a CSV and creates a database of mitochondrial SNPs
-CSV format (important is Bank ID, acquisitions, acq_id)
-Bank ID,Group,Brain Region,acquisitions,acq_id,pass-reads,n50,LINE_single_end,LINE_double_end,LINE_none,AluYa5_single_end,AluYa5_double_end,AluYa5_none,AluYb8_single_end,AluYb8_double_end,AluYb8_none,LINE_enrichment,AluYa5_enrichment AluYb8_enrichment,Known_polymorphic_LINE-1_captured,Known_polymorphic_AluY_captured
-196,Control,Frontal Cortex,/path_to/acquisitions,acq_id,"236,900","7,571",35149,12005,177792,66625,11899,146422,64887,10661,149398,20.96%,34.91%,33.58%,187,679
+Takes a CSV and creates a database of mitochondrial SNPs.
 
--create requires --csv --db --outdir and --rcs arguments
+**CSV format** (important is Bank ID, acquisitions, acq_id):
+Bank ID,Group,Brain Region,acquisitions,acq_id,pass-reads... [truncated for brevity]
 
-ex.
-    python /path_to/mito_validate_final.py -create --rcs /path_to/rCRS.fasta --csv /path_to/experiments.csv --db /path_to/output/test_database_prefix --outdir /path_to/output
+* `-create` requires `--csv`, `--db`, `--outdir`, and `--rcs` arguments.
+
+**Example:**
+```bash
+python /path_to/mito_validate_final.py -create --rcs /path_to/rCRS.fasta --csv /path_to/experiments.csv --db /path_to/output/test_database_prefix --outdir /path_to/output
+```
 
 ## Add sample:
 Adds a sample to a new database or an existing database
