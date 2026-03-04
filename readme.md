@@ -13,6 +13,8 @@ Takes a CSV and creates a database of mitochondrial SNPs.
 **CSV format** (important is Bank ID, acquisitions, acq_id):
 Bank ID,Group,Brain Region,acquisitions,acq_id,pass-reads...
 
+acq_id = sample.sorted.bam
+
 * `-create` requires `--csv`, `--db`, `--outdir`, and `--rcs` arguments.
 
 **Example:**

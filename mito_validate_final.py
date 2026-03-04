@@ -62,6 +62,7 @@ def make_vcf(bam_file, rcs_file, output_dir, mt_chrom = "chrM", level = ".9", po
             mt_bam
         ], check=True)
         subprocess.run(["tabix", "-p", "vcf", vcf_output], check = True)
+        
         if post_filter:
             if os.path.exists(vcf_output):
                 filtered_vcf = os.path.join(output_dir, "temp_filtered.vcf.gz")
