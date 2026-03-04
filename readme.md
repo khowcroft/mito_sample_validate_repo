@@ -6,7 +6,7 @@ Note: for the database prefix --db: if the file name is mitochondria_sample_vali
 Takes a CSV and creates a database of mitochondrial SNPs.
 
 **CSV format** (important is Bank ID, acquisitions, acq_id):
-Bank ID,Group,Brain Region,acquisitions,acq_id,pass-reads... [truncated for brevity]
+Bank ID,Group,Brain Region,acquisitions,acq_id,pass-reads...
 
 * `-create` requires `--csv`, `--db`, `--outdir`, and `--rcs` arguments.
 
@@ -17,17 +17,22 @@ python /path_to/mito_validate_final.py -create --rcs /path_to/rCRS.fasta --csv /
 
 ## Add sample:
 Adds a sample to a new database or an existing database
--add requires --bam, --acq, --bank, --outdir, --db, and --rcs arguments
+* -add requires --bam, --acq, --bank, --outdir, --db, and --rcs arguments
 
-ex.
-    python /path_to/mito_validate_final.py -add --bam /path_to/sample.sorted.bam --acq sample1_id --bank person_id --outdir /path_to/output --db /path_to/output/db_to_add_prefix --rcs /path_to/rCRS.fasta
+**Example:** 
+```bash   
+python /path_to/mito_validate_final.py -add --bam /path_to/sample.sorted.bam --acq sample1_id --bank person_id --outdir /path_to/output --db /path_to/output/db_to_add_prefix --rcs /path_to/rCRS.fasta
+```
 
 ## Remove Sample:
 removes a sample from the database
--remove requires the --acq and --db
+* -remove requires the --acq and --db
 
-ex.
-    python /path_to/mito_validate_final.py -remove --db /path_to/test_database_prefix --acq sample_id_to_remove
+
+**Example:** 
+```bash   
+python /path_to/mito_validate_final.py -remove --db /path_to/test_database_prefix --acq sample_id_to_remove
+```
 
 ## Check all samples in a database:
 compares all the samples in the database and gives a histogram of all the comparison scores and an output file describing which samples match eachother
@@ -35,23 +40,29 @@ Specifically, it will give:
 1. Samples where the bank IDs match but a score of 1 (identical) isn't achieved but is still above the threshold]
 2. Samples where the bank IDs match and the score is below the threshold
 3. Samples where the bank IDs dont match but the score is above the threshold
--checkall requires --outdir and --db arguments
-takes an optional --hist  and or --threshold and or --log_file 
+* -checkall requires --outdir and --db arguments
+* takes an optional --hist  and or --threshold and or --log_file 
     
-ex.
+**Example:** 
+```bash  
     python /path_to/mito_validate_final.py -checkall --outdir /path_to/output --db /path_to/output/database_prefix
+```
+
 or with optional args:
+```bash  
     python /path_to/mito_validate_final.py -checkall --outdir /path_to/output --hist hist2.png --threshold .85 --log_file log_file.txt --db /path_to/output/database_prefix
+```
 
 
 ## Compare a sample to the database without adding:
 Compares the given sample to all of the samples in the database and outputs a line to matches.txt in outdir (accumulates) as well as the vizualization compared to the matches or the bank ID of interest
--compare requires --bam, --rcs, --outdir, --db arguments
-optionally can use --visualize to name the visualization output and --compare_sample to name a specific bank_id to compare to
+* -compare requires --bam, --rcs, --outdir, --db arguments
+* optionally can use --visualize to name the visualization output and --compare_sample to name a specific bank_id to compare to
 
-ex.
+**Example:** 
+```bash  
     python /path_to/mito_validate_final.py -compare --bam /path_to/sample.sorted.bam --rcs /path_to/rCRS.fasta --outdir /path_to/output --db /path_to/test_database_prefix --visualize vis_file.png --compare_sample bankID_name
-
+```
 
 
 
