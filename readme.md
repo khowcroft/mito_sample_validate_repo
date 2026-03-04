@@ -1,5 +1,10 @@
 Activate environment mito_validate_vcfs_matrix
 
+uses mutserve
+mtDNA Variant Detection v2.0.1
+https://github.com/seppinho/mutserve
+(c) Sebastian Schoenherr, Hansi Weissensteiner, Lukas Forer
+
 Note: for the database prefix --db: if the file name is mitochondria_sample_validation/final/output/add_to_none_test_meta.json, the prefix is add_to_none_test
 
 ## Create Database:
@@ -14,6 +19,10 @@ Bank ID,Group,Brain Region,acquisitions,acq_id,pass-reads...
 ```bash
 python /path_to/mito_validate_final.py -create --rcs /path_to/rCRS.fasta --csv /path_to/experiments.csv --db /path_to/output/test_database_prefix --outdir /path_to/output
 ```
+
+**Outputs:**
+test_database_prefix_meta.json
+test_database_prefix.npz
 
 ## Add sample:
 Adds a sample to a new database or an existing database
@@ -53,6 +62,10 @@ or with optional args:
     python /path_to/mito_validate_final.py -checkall --outdir /path_to/output --hist hist2.png --threshold .85 --log_file log_file.txt --db /path_to/output/database_prefix
 ```
 
+**Outputs:**
+hist2.png - A histogram of all the scores when you compare each sample in the database to each other sample
+log2.txt - A log of all the interesting comparisons. It's not interesting if two different samples get a score below the threshold or 2 of the same samples match identically.
+
 
 ## Compare a sample to the database without adding:
 Compares the given sample to all of the samples in the database and outputs a line to matches.txt in outdir (accumulates) as well as the vizualization compared to the matches or the bank ID of interest
@@ -61,10 +74,16 @@ Compares the given sample to all of the samples in the database and outputs a li
 
 **Example:** 
 ```bash  
-    python /path_to/mito_validate_final.py -compare --bam /path_to/sample.sorted.bam --rcs /path_to/rCRS.fasta --outdir /path_to/output --db /path_to/test_database_prefix --visualize vis_file.png --compare_sample bankID_name
+    python /path_to/mito_validate_final.py -compare --bam /path_to/sample.sorted.bam --rcs /path_to/rCRS.fasta --outdir /path_to/output --db /path_to/test_database_prefix
 ```
 
-
+or with optional args
+```bash  
+    python /path_to/mito_validate_final.py -compare --bam /path_to/sample.sorted.bam --rcs /path_to/rCRS.fasta --outdir /path_to/output --db /path_to/test_database_prefix --visualize vis_file.png --compare_sample bankID_name
+```
+**Outputs:**
+matches_log.txt - get's appended to with subsequent comparisons
+vis_file.png - comparison visualziation against database to bankID_name samples if --compare_sample or just matching samples without --compare_sample
 
 ## args
 ```
