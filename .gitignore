@@ -1,2 +1,13 @@
 output/
+output_pre_ubam/
+tests/
 test_final.ipynb
+ubam_test.csv
+experiments_updated.csv
+experiments_updated_with_extension.csv
+aligned_for_ST020_and_5/
+mito_validate_level_param.py
+environment_all.yml
+new_env_yml_to_try.yml
+bam_tests.csv
+bam_tests_not_organ.csv

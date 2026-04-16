@@ -15,40 +15,84 @@ from scipy.sparse import csc_matrix, vstack, hstack, save_npz, load_npz
 # limit java?
 #os.environ["_JAVA_OPTIONS"] = "-Xmx512m"
 
+LEVEL = "0.9"
+AF_FILTER = 0.9
+# LEVEL = None
+# AF_FILTER = None
 
-def make_vcf(bam_file, rcs_file, output_dir, mt_chrom = "chrM", level = ".9", post_filter = True):
+def make_vcf_unaligned_bam(ubam_file, rcs_file, output_dir, post_filter = True, threads = 4):
     """
-    Extracts mitochondrial reads from a BAM file, generates a VCF using Mutserve, and optionally filters it.
-    
+    Takes an UNALIGNED BAM (uBAM), aligns it to the reference using BWA, 
+    sorts/indexes it, and runs Mutserve to generate a VCF.
     Inputs:
-        bam_file (str): Path to the input BAM file.
-        rcs_file (str): Path to the reference FASTA file (e.g., rCRS.fasta).
-        output_dir (str): Directory where temporary and final outputs will be saved.
-        mt_chrom (str): The chromosome name for mitochondria in the BAM file (default: "chrM").
-        level (str): Variant calling threshold for Mutserve (default: ".9").
-        post_filter (bool): If True, filters the VCF to keep only variants with AF >= 0.9 (default: True).
-        
+        unaligned_bam (str): Path to the input uBAM file.
+        rcs_file (str): Path to the reference FASTA (e.g., rCRS.fasta).
+        output_dir (str): Directory for outputs.
+        post_filter (bool): If True, filters VCF for AF >= 0.9.
+        threads (int): CPU threads for BWA alignment.
+
     Outputs:
-        vcf_output (str): Path to the final generated VCF file. Returns None if the process fails.
+        vcf_output (str): Path to the final VCF. Returns None on failure.
     """
+    
+    
+    
     mt_bam = os.path.join(output_dir, "temp.bam")
+    # temp = ubam_file.strip().split("/")[6]
+    # print(temp)
+    # mt_bam = f"/home/korb/mitochondria_sample_validation/mito_sample_validate_repo/aligned_for_ST020_and_5/{temp}_mt.bam" #remove this, I just wanted to keep the bams so I can run subsequent tests
+    temp_aligned_bam = os.path.join(output_dir, "temp_aligned_sorted.bam")
     vcf_output = os.path.join(output_dir, "temp_result.vcf.gz")
+    
+    temp_files = [
+        mt_bam, 
+        mt_bam + ".bai", 
+        temp_aligned_bam, 
+        temp_aligned_bam + ".bai",
+        vcf_output + ".tbi",
+        os.path.join(output_dir, "temp_filtered.vcf.gz")
+    ]
     try:
+        print(f"Aligning {ubam_file} to {rcs_file} using Minimap2...")
+        
+        #extract fastq
+        cmd_fastq = ["samtools", "fastq", "-@", str(threads), ubam_file]
+        
+        cmd_minimap = ["minimap2", "-ax", "lr:hq", "-t", str(threads), f"{rcs_file}.mmi", "-"]
+        
+        # filter out unmapped/supplementary reads BEFORE sorting
+        # -u outputs uncompressed BAM (faster for piping), -F 2052 excludes unmapped/supplementary
+        cmd_filter = ["samtools", "view", "-u", "-F", "2052", "-"]
+        
+        # sort only the successfully mapped chrM reads
+        cmd_sort = ["samtools", "sort", "-@", str(threads), "-o", temp_aligned_bam, "-"]
+
+        # Chain the processes together in memory (no intermediate hard drive writes)
+        with subprocess.Popen(cmd_fastq, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as p1:
+            with subprocess.Popen(cmd_minimap, stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as p2:
+                with subprocess.Popen(cmd_filter, stdin=p2.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as p3:
+                    subprocess.run(cmd_sort, stdin=p3.stdout, check=True)
+                
+        print("Indexing aligned BAM...")
+        subprocess.run(["samtools", "index", temp_aligned_bam], check=True)
+
+                
         # remove old VCF if it exists so Mutserve doesn't complain about overwriting
         if os.path.exists(vcf_output):
             os.remove(vcf_output)
 
-        # extract Mitochondrial Reads to the temp BAM
+        #becasue you are aligning to the rcs_file, which si only chrM
         subprocess.run([
             "samtools", "view", "-b",
-            "-F", "2048",       # exclude Supplementary
+            "-F", "2052",       # exclude Supplementary and unmapped
             "-o", mt_bam, 
-            str(bam_file), 
-            mt_chrom
+            temp_aligned_bam 
         ], check=True)
 
         #index to fix warning (but works without)
         subprocess.run(["samtools", "index", mt_bam], check=True)
+        coverage = get_coverage(mt_bam)
+
 
         #mutserver
         subprocess.run([
@@ -56,7 +100,7 @@ def make_vcf(bam_file, rcs_file, output_dir, mt_chrom = "chrM", level = ".9", po
             "--reference", str(rcs_file),
             "--output", vcf_output, 
             "--threads", "1",
-            "--level", level, #Should adjust this number
+            "--level", LEVEL, #Should adjust this number
             #"--no-freq", didnt work
             # may need to add --noFreq, because there are some that pass below --level if theyre a common variant
             mt_bam
@@ -73,19 +117,19 @@ def make_vcf(bam_file, rcs_file, output_dir, mt_chrom = "chrM", level = ".9", po
                 vcf_out = pysam.VariantFile(filtered_vcf, 'wz', header=vcf_in.header)
                 
                 for record in vcf_in:
-                    # Iterate over samples (usually just one in Mutserve output)
-                    # logic: if ANY sample has AF >= 0.9, keep the record
+                    # if a record has AF >= AF_filter, keep the record
                     keep_record = False
                     
                     for sample in record.samples.values():
-                        # Get AF, default to 0.0 if missing
+                        #this will just be one sample because were only doing one sample vcf files
+                        # get AF, default to 0.0 if missing
                         af = sample.get('AF', 0.0)
                         
-                        # Pysam often returns AF as a tuple/list
+                        # if af is a tuple or list
                         if isinstance(af, (list, tuple)):
                             af = af[0]
                         
-                        if float(af) >= 0.9:
+                        if float(af) >= AF_FILTER:
                             keep_record = True
                             break
                     
@@ -98,22 +142,135 @@ def make_vcf(bam_file, rcs_file, output_dir, mt_chrom = "chrM", level = ".9", po
                 #overwrite the original output with the filtered one
                 os.replace(filtered_vcf, vcf_output)            
             
+        return vcf_output, coverage
+
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to process {ubam_file}: {e}")
+        return None
+    
+    finally:
+        # Cleanup logic: Remove everything in the temp_files list
+        for f in temp_files:
+            if os.path.exists(f):
+                os.remove(f)
+
+
+def get_mito_contig_name(bam_path):
+        """Inspects a BAM header to find the likely name of the mitochondrial chromosome."""
+        with pysam.AlignmentFile(bam_path, "rb") as bam:
+            if len(bam.references) == 1:
+                return bam.references[0] # for ubam
+            for ref in bam.references:
+                if ref in ["chrM", "MT", "rCRS", "NC_012920.1"]:
+                    return ref
+        return None # If it can't find it
+
+def make_vcf(bam_file, rcs_file, output_dir, post_filter = True):
+    """
+    Extracts mitochondrial reads from a BAM file, generates a VCF using Mutserve, and optionally filters it.
+    
+    Inputs:
+        bam_file (str): Path to the input BAM file.
+        rcs_file (str): Path to the reference FASTA file (e.g., rCRS.fasta).
+        output_dir (str): Directory where temporary and final outputs will be saved.
+        mt_chrom (str): The chromosome name for mitochondria in the BAM file (default: "chrM").
+        level (str): Variant calling threshold for Mutserve (default: ".9").
+        post_filter (bool): If True, filters the VCF to keep only variants with AF >= 0.9 (default: True).
         
+    Outputs:
+        vcf_output (str): Path to the final generated VCF file. Returns None if the process fails.
+    """
+    
+    
+    mt_chrom = get_mito_contig_name(bam_file)
+    mt_bam = os.path.join(output_dir, "temp.bam")
+    vcf_output = os.path.join(output_dir, "temp_result.vcf.gz")
+    
+    temp_files = [
+        mt_bam, 
+        mt_bam + ".bai", 
+        vcf_output + ".tbi",
+        os.path.join(output_dir, "temp_filtered.vcf.gz")
+    ]
+    try:
+        # remove old VCF if it exists so Mutserve doesn't complain about overwriting
+        if os.path.exists(vcf_output):
+            os.remove(vcf_output)
+
+        # extract Mitochondrial Reads to the temp BAM
+        subprocess.run([
+            "samtools", "view", "-b",
+            "-F", "2052",       # exclude Supplementary and unmapped
+            "-o", mt_bam, 
+            str(bam_file), 
+            mt_chrom
+        ], check=True)
+
+        #index to fix warning (but works without)
+        subprocess.run(["samtools", "index", mt_bam], check=True)
+
+        #mutserver
+        subprocess.run([
+            "mutserve", "call",
+            "--reference", str(rcs_file),
+            "--output", vcf_output, 
+            "--threads", "1",
+            "--level", LEVEL, #Should adjust this number
+            #"--no-freq", didnt work
+            # may need to add --noFreq, because there are some that pass below --level if theyre a common variant
+            mt_bam
+        ], check=True)
+        subprocess.run(["tabix", "-p", "vcf", vcf_output], check = True)
         
-        #remove bam
-        if os.path.exists(mt_bam):
-            os.remove(mt_bam)
-        if os.path.exists(mt_bam + ".bai"):
-            os.remove(mt_bam + ".bai")
-        
+        if post_filter:
+            if os.path.exists(vcf_output):
+                filtered_vcf = os.path.join(output_dir, "temp_filtered.vcf.gz")
+                
+                # open the Mutserve output
+                vcf_in = pysam.VariantFile(vcf_output)
+                # open a new file for writing ('wz' writes compressed VCF)
+                vcf_out = pysam.VariantFile(filtered_vcf, 'wz', header=vcf_in.header)
+                
+                for record in vcf_in:
+                    # if sample has AF >= af_filter, keep it
+                    keep_record = False
+                    
+                    for sample in record.samples.values():                        
+                        #this will just be one sample because were only doing one sample vcf files
+                        # get AF, 0 default
+                        af = sample.get('AF', 0.0)
+                        
+                        # if AF is tuple/list
+                        if isinstance(af, (list, tuple)):
+                            af = af[0]
+                        
+                        if float(af) >= AF_FILTER:
+                            keep_record = True
+                            break
+                    
+                    if keep_record:
+                        vcf_out.write(record)
+                
+                vcf_in.close()
+                vcf_out.close()
+                
+                #overwrite the original output with the filtered one
+                os.replace(filtered_vcf, vcf_output)            
+            
 
         return vcf_output
 
     except subprocess.CalledProcessError as e:
         print(f"Failed to process {bam_file}: {e}")
         return None
+    
+    finally:
+        for f in temp_files:
+            if os.path.exists(f):
+                os.remove(f)
 
-def get_coverage(mt_bam, mt_chrom = "chrM"):
+def get_coverage(mt_bam):
+    mt_chrom = get_mito_contig_name(mt_bam)
     try:
         cov_result = subprocess.run([
                 "samtools", "coverage", 
@@ -125,7 +282,7 @@ def get_coverage(mt_bam, mt_chrom = "chrM"):
         # 1. Get the text output (e.g., "chrM  1  16569  540  100.0  55.4  ...")
         output_line = cov_result.stdout.strip()
             
-            # 2. Split into a list of strings
+        # 2. Split into a list of strings
         fields = output_line.split('\t')
             
         # 3. Extract the Mean Depth (Column 7, index 6)
@@ -133,7 +290,6 @@ def get_coverage(mt_bam, mt_chrom = "chrM"):
         mean_depth = float(fields[6])
         return mean_depth
     except subprocess.CalledProcessError as e:
-        # e.stderr contains the error message from samtools
         print(f"Error running samtools on {mt_bam}:")
         print(f"Exit code: {e.returncode}")
         print(f"Error message: {e.stderr}")
@@ -214,26 +370,26 @@ class MitoVariantDatabase:
         
         return vector
 
-    def add_sample(self, vcf_path, sample_id, bank_id, coverage=None):
+    def add_sample(self, vcf_path, sample_id, personal_id, coverage=None):
         """
         Adds a new sample to the existing sparse matrix database.
         
         Inputs:
             vcf_path (str): Path to the VCF file to be added.
             sample_id (str): Unique identifier for the acquisition/sample.
-            bank_id (str): Identifier for the biological source or bank.
+            personal_id (str): Identifier for the biological source.
             coverage (float): Mean sequencing depth of the sample.
             
         Outputs:
             None. Modifies self.db_matrix, self.sample_ids, and self.cash_sum in place.
         """
-        if ([sample_id, str(bank_id), coverage] in self.sample_ids):
+        if ([sample_id, str(personal_id), coverage] in self.sample_ids):
             print("sample already in database, not actually adding")
         else:
             new_vector = self.vcf_to_vector(vcf_path)
             # add the new column to existing DB
             self.db_matrix = hstack([self.db_matrix, new_vector])
-            self.sample_ids.append((sample_id, str(bank_id), coverage))
+            self.sample_ids.append((sample_id, str(personal_id), coverage))
             
             self.cash_sum = np.append(self.cash_sum, new_vector.sum())
         
@@ -269,7 +425,7 @@ class MitoVariantDatabase:
         # remove from sm
         self.cash_sum = np.delete(self.cash_sum, target_idx)
         
-        print(f"Successfully removed sample: {removed_metadata[0]} (Bank: {removed_metadata[1]})")
+        print(f"Successfully removed sample: {removed_metadata[0]} (PID: {removed_metadata[1]})")
         return True
 
     def compare_sample(self, vcf_path, threshold=0.9):
@@ -288,8 +444,19 @@ class MitoVariantDatabase:
         """
         if self.db_matrix.shape[1] == 0:
             return np.array([])
+        
+        if isinstance(vcf_path, str):
+        # Handle string or path string
+            # print(f"Variable is a string")
+            sample_vec = self.vcf_to_vector(vcf_path)
+            # print("sample_vec has shape: ", sample_vec.shape)
+        elif isinstance(vcf_path, csc_matrix):
+            # print(f"Variable is csc_matrix wiht shape {vcf_path.shape}")
+            sample_vec = vcf_path
+        else:
+            print("Unknown type")
 
-        sample_vec = self.vcf_to_vector(vcf_path)
+        
         
         #1: dot product of sample with each other sample and summed
         intersection = self.db_matrix.T @ sample_vec
@@ -310,7 +477,8 @@ class MitoVariantDatabase:
         return scores > threshold
     
     
-    def visualize_sample(self, vcf_path, outfile, coverage = 100.0, threshold=0.8, compare = None): #set to 100 so it works so the default isn't low coverage
+    
+    def visualize_sample(self, vcf_path, outfile, coverage = 100.0, threshold=0.8, compare = None, target_sample = None): #set to 100 so it works so the default isn't low coverage
         """
         #get the database where the columns are the ones that match
         
@@ -322,18 +490,30 @@ class MitoVariantDatabase:
         Generates an IGV-style plot comparing a target sample's variants against matching database samples.
         
         Inputs:
-            vcf_path (str): Path to the target VCF file.
+            vcf_path (str): Path to the target VCF file or array if you already have it
             coverage (float): Coverage of the target sample; influences plotting color (default: 100.0).
             threshold (float): Minimum similarity threshold to retrieve matches for plotting (default: 0.8).
-            compare (str): Specific bank_id to force a comparison with, overriding the threshold (default: None).
+            compare (str): Specific PID to force a comparison with, overriding the threshold (default: None).
             
         Outputs:
-            None. Renders a matplotlib plot to the screen.
+            None. saves a matplotlib plot.
         """
         
+        if isinstance(vcf_path, str):
+        # Handle string or path string
+            # print(f"Variable is a string")
+            sample_vec = self.vcf_to_vector(vcf_path)
+            # print("sample_vec has shape: ", sample_vec.shape)
+        elif isinstance(vcf_path, csc_matrix):
+            # print(f"Variable is csc_matrix wiht shape {vcf_path.shape}")
+            sample_vec = vcf_path
+        else:
+            print("Unknown type")
+            print(vcf_path.type())
+        
 
-        # 1. Parse the input sample
-        sample_vec = self.vcf_to_vector(vcf_path)
+        # # 1. Parse the input sample
+        # sample_vec = self.vcf_to_vector(vcf_path)
         # Get indices of variants (rows in the sparse matrix)
         target_indices = sample_vec.indices 
         # Convert row indices back to genome position (1-16569)
@@ -363,7 +543,9 @@ class MitoVariantDatabase:
         fig, ax = plt.subplots(figsize=(14, 2 + 0.5 * len(match_idxs)))
         
         y_ticks = [0]
-        y_labels = ["Target Input"]
+        if target_sample:
+            y_labels = [target_sample]
+        else: y_labels = ["Target Input"]
 
         # 4. Plot Target Sample (Reference for this view) at y=0
         print(coverage)
@@ -422,7 +604,7 @@ class MitoVariantDatabase:
         ax.set_yticks(y_ticks)
         ax.set_yticklabels(y_labels)
         ax.set_xlabel("Mitochondrial Position (bp)")
-        ax.set_title(f"Variant Comparison (Threshold >= {threshold})")
+        ax.set_title(f"Variants Comparison")
         ax.set_xlim(0, 16569)
         ax.set_ylim(-1, len(match_idxs) + 1)
         
@@ -443,6 +625,7 @@ class MitoVariantDatabase:
 
         plt.tight_layout()
         plt.savefig(outfile)
+        plt.close()
         
     def compare_for_hist(self, vcf_path):
         """
@@ -477,7 +660,7 @@ class MitoVariantDatabase:
 
         return scores
     
-    def make_output(self, matches, mito_db, acq_id, bank_id, output_dir, file_name = "matches_log.txt"):
+    def make_output(self, matches, mito_db, acq_id, personal_id, output_dir, file_name = "matches_log.txt"):
         """
         Appends matching samples to a text file.
         
@@ -485,7 +668,7 @@ class MitoVariantDatabase:
             matches (numpy.ndarray): Boolean array indicating matched samples.
             mito_db (MitoVariantDatabase): The database instance containing sample metadata.
             acq_id (str): Acquisition ID of the evaluated sample.
-            bank_id (str): Bank ID of the evaluated sample.
+            personal_id (str): PID of the evaluated sample.
             output_dir (str): Directory where the log file will be stored.
             file_name (str): Name of the output log file (default: "matches_log.txt").
             
@@ -500,7 +683,7 @@ class MitoVariantDatabase:
             matching_names = [mito_db.sample_ids[i] for i in match_indices]
             
             # 3. Create the message string
-            log_message = f"Sample {acq_id}, {bank_id} matches existing samples: {matching_names}\n"
+            log_message = f"Sample {acq_id}, {personal_id} matches existing samples: {matching_names}\n"
                         
             # 5. Append to File
             # mode='a' means "append" (add to the end without deleting previous lines)
@@ -531,28 +714,98 @@ class MitoVariantDatabase:
         for index, row in filtered_df.iterrows():
             acq_folder = row['acquisitions']
             acq_id = row['acq_id']
-            sample_bam = acq_folder + f"/{acq_id}.sorted.bam"
-            bank_id = str(row.name)
+            extension = row['extension']
+            sample_bam = acq_folder + f"/{acq_id}{extension}"
             
-            vcf_file = make_vcf(sample_bam, rcs_file, output_dir)
+            personal_id = str(row.name)
             
-            coverage = get_coverage(sample_bam)
+            if is_unaligned_bam(sample_bam):
+                vcf_file, coverage = make_vcf_unaligned_bam(sample_bam, rcs_file, output_dir)
+            else:
+                vcf_file = make_vcf(sample_bam, rcs_file, output_dir)
+                coverage = get_coverage(sample_bam)
+            
+            
             #check matches
             #matches = mito_db.compare_sample(vcf_file, threshold=THRESHOLD) 
             
-            #make_output(matches, mito_db, acq_id, bank_id, output_dir)
+            #make_output(matches, mito_db, acq_id, personal_id, output_dir)
 
             # add to Database
-            self.add_sample(vcf_file, sample_id=acq_id, bank_id = bank_id, coverage = coverage)
+            self.add_sample(vcf_file, sample_id=acq_id, personal_id = personal_id, coverage = coverage)
 
         #save Final Database
         self.save(save_file)
+        
+    def make_igv_output_putative(self, putative_set, threshold, output_dir):
+        """helper to make the output of every putative error into a file for checkall
+
+        Args:
+            putative_set (set of tuples): a set of the indices of the rows to look at and whether it's putative due to low coverage
+            threshold (float): the threshold at which to consider files the same PID
+            output_dir (str): the output directory
+        """
+        putative_dir = output_dir+"/putative_visualization"
+        coverage_dir = putative_dir+"/low_coverage"
+        os.makedirs(putative_dir, exist_ok=True)
+        os.makedirs(coverage_dir, exist_ok=True)
+        # print(putative_set)
+        # assert(False)
+        for index, low_coverage in putative_set:
+            array_1 = self.db_matrix[:, index]
+            coverage = self.sample_ids[index][2]
+            
+            #make a visualization of sample 1 against its supposed sample
+            coverage_str = ""
+            if low_coverage:
+                coverage_str = "low_coverage/"
+            first_file = f"{putative_dir}/{coverage_str}compare_{self.sample_ids[index][0]}_to_sample_{self.sample_ids[index][1]}"
+            self.visualize_sample(vcf_path = array_1, outfile= first_file, coverage=coverage, threshold = threshold, compare = self.sample_ids[index][1], target_sample=self.sample_ids[index][0])
+            
+            #make vis against everything that matches
+            second_file = f"{putative_dir}/{coverage_str}compare_{self.sample_ids[index][0]}_to_matches"
+            self.visualize_sample(vcf_path =array_1, outfile= second_file, coverage=coverage, threshold = threshold, target_sample=self.sample_ids[index][0])
+            
+    def make_igv_output_putative_compare(self, threshold, output_dir, filter_sample = None):
+        
+        putative_dir = output_dir+"/putative_visualization"+f"/{filter_sample}"
+        os.makedirs(putative_dir, exist_ok=True)
+
+        # Find the index
+        index = None
+        for i, sublist in enumerate(self.sample_ids):
+            if sublist[0] == filter_sample:
+                index = i
+                break
+        
+        array_1 = self.db_matrix[:, index]
+        coverage = self.sample_ids[index][2]
+            
+        #make a visualization of sample 1 against its supposed sample
+            
+        first_file = f"{putative_dir}/compare_{self.sample_ids[index][0]}_to_sample_{self.sample_ids[index][1]}"
+        self.visualize_sample(vcf_path = array_1, outfile= first_file, coverage=coverage, threshold = threshold, compare = self.sample_ids[index][1], target_sample=self.sample_ids[index][0])
+            
+        #make vis against everything that matches
+        second_file = f"{putative_dir}/compare_{self.sample_ids[index][0]}_to_matches"
+        # print(second_file)
+        self.visualize_sample(vcf_path =array_1, outfile= second_file, coverage=coverage, threshold = threshold, target_sample=self.sample_ids[index][0])
+            
 
 
-    def check_all_database(self, output_dir, histogram_save, log_file, threshold):
+    def check_all_database(self, output_dir, histogram_save, log_file, threshold, visualize_putative = False):
         """
         Calculates pairwise similarity for all samples currently in the database 
         and plots a histogram of the scores. Excludes self-comparisons.
+        
+
+        Args:
+            output_dir (str): the destination of the histogram, log file, and visualizations
+            histogram_save (str): the name of the histogram file
+            log_file (str): the name of the log_file
+            threshold (float): the threshold at which to consider two files the same or different (default is .8)
+            visualize_putative (bool, optional): when this is true, you get a folder of visualizations for everything that is potentially incorrect based on the given labels. Defaults to False.
+            filter_putative (str, optional): this is useful for when you add to a database and want to look at the potentail errors from exactly one same rather than the whole database. Defaults to None.
         """
         n_samples = self.db_matrix.shape[1]
         if n_samples < 2:
@@ -585,41 +838,83 @@ class MitoVariantDatabase:
         print(f"Logging to {log_path}...")
         
         with open(log_path, "w") as f:
+            visaully_check_set = set()
             for i, j in zip(upper_tri_idx[0], upper_tri_idx[1]):
                 coverage_warning = ""
                 cov_end = ""
+                low_cov_i_or_j = False
                 if self.sample_ids[i][2] < 10:
                     coverage_warning += f"Warning: coverage on sample {self.sample_ids[i][0]} = {self.sample_ids[i][2]} < 10\n"
                     cov_end = "\n"
+                    low_cov_i_or_j = True
                 if  self.sample_ids[j][2] < 10:
                     coverage_warning += f"Warning: coverage on sample {self.sample_ids[j][0]} = {self.sample_ids[j][2]} < 10\n"
                     cov_end = "\n"
+                    low_cov_i_or_j = True
                 if scores_matrix[i, j] >= threshold:
                     if self.sample_ids[i][1] != self.sample_ids[j][1]:
-                        # sample_ids elements are tuples like (sample_id, bank_id, coverage)
+                        # sample_ids elements are tuples like (sample_id, personal_id, coverage)
                         s1 = f"{self.sample_ids[i][0]} ({self.sample_ids[i][1]})"
                         s2 = f"{self.sample_ids[j][0]} ({self.sample_ids[j][1]})"
-                        f.write(f"{cov_end}{coverage_warning}Match above threshold for different Bank IDs ({scores_matrix[i, j]:.2f}): {s1} <--> {s2}{cov_end}\n")
+                        f.write(f"{cov_end}{coverage_warning}Match above threshold for different PIDs ({scores_matrix[i, j]:.2f}): {s1} <--> {s2}{cov_end}\n")
+                        
+                        #making the igv esque output for each failing sample:
+                        if visualize_putative:
+                            visaully_check_set.add((i, low_cov_i_or_j))
+                            visaully_check_set.add((j, low_cov_i_or_j))
                     elif scores_matrix[i, j] < 1:
                         s1 = f"{self.sample_ids[i][0]} ({self.sample_ids[i][1]})"
                         s2 = f"{self.sample_ids[j][0]} ({self.sample_ids[j][1]})"
-                        f.write(f"{cov_end}{coverage_warning}Match above threshold but below 1 same Bank ID ({scores_matrix[i, j]:.2f}): {s1} <--> {s2}{cov_end}\n")
+                        f.write(f"{cov_end}{coverage_warning}Match above threshold but below 1 same PID ({scores_matrix[i, j]:.2f}): {s1} <--> {s2}{cov_end}\n")
                 elif self.sample_ids[i][1] == self.sample_ids[j][1]:
                     s1 = f"{self.sample_ids[i][0]} ({self.sample_ids[i][1]})"
                     s2 = f"{self.sample_ids[j][0]} ({self.sample_ids[j][1]})"
-                    f.write(f"{cov_end}{coverage_warning}Match below threshold from same Bank ID ({scores_matrix[i, j]:.2f}): {s1} <--> {s2}{cov_end}\n")
+                    f.write(f"{cov_end}{coverage_warning}Match below threshold from same PID ({scores_matrix[i, j]:.2f}): {s1} <--> {s2}{cov_end}\n")
+                    if visualize_putative:
+                        visaully_check_set.add((i, low_cov_i_or_j))
+                        visaully_check_set.add((j, low_cov_i_or_j))
+                            
+        if visualize_putative:
+            self.make_igv_output_putative(visaully_check_set, threshold, output_dir)
 
-        # plot
-        passing_scores = all_scores[all_scores >= threshold]
-        failing_scores = all_scores[all_scores < threshold]
+        #plot
+        # Extract personal IDs and coverages into arrays for quick comparison
+        pids = np.array([s[1] for s in self.sample_ids])
+        covs = np.array([s[2] for s in self.sample_ids])
+        
+        # Get the PIDs and coverages for the pairs we are plotting
+        pids_i = pids[upper_tri_idx[0]]
+        pids_j = pids[upper_tri_idx[1]]
+        covs_i = covs[upper_tri_idx[0]]
+        covs_j = covs[upper_tri_idx[1]]
+        
+        # Create boolean masks for same vs different PIDs
+        same_id_mask = (pids_i == pids_j)
+        diff_id_mask = ~same_id_mask
+
+        # Create boolean masks for coverage (True if EITHER sample in the pair is < 10)
+        low_cov_mask = (covs_i < 10) | (covs_j < 10)
+        high_cov_mask = ~low_cov_mask
+        
+        # Filter scores into the four new categories
+        scores_same_high = all_scores[same_id_mask & high_cov_mask]
+        scores_diff_high = all_scores[diff_id_mask & high_cov_mask]
+        scores_same_low = all_scores[same_id_mask & low_cov_mask]
+        scores_diff_low = all_scores[diff_id_mask & low_cov_mask]
             
         plt.figure(figsize=(10, 6))
             
-        plt.hist([passing_scores, failing_scores], 
+        # Plot stacked using the 4 categories
+        plt.hist([scores_same_high, scores_diff_high, scores_same_low, scores_diff_low], 
                 bins=50, 
                 stacked=True, 
-                color=['green', 'red'], 
-                label=['Above Threshold', 'Below Threshold'],
+                color=['#2ca02c', '#d62728', 'yellowgreen', 'tomato'], 
+                label=[
+                    'Same PID (Good Coverage)', 
+                    'Different PID (Good Coverage)',
+                    'Same PID (Low Coverage)', 
+                    'Different PID (Low Coverage)'
+                ],
                 edgecolor='black',
                 alpha=0.7)
         
@@ -693,6 +988,63 @@ def remove_files(outdir):
     index_path = os.path.join(outdir, "temp_result.vcf.gz.tbi")
     if os.path.exists(index_path):
         os.remove(index_path)
+        
+def is_unaligned_bam(bam_path):
+    """
+    Checks if a BAM file is unaligned (uBAM) or aligned.
+    Returns True if unaligned, False if aligned.
+    """
+    try:
+        # (check_sq=False allows reading uBAMs)
+        with pysam.AlignmentFile(bam_path, "rb", check_sq=False) as bam:
+            # 1. if there are no reference sequences defined, it's definitely a uBAM.
+            if len(bam.references) == 0:
+                return True
+            
+            # 2. if references exist, check the first few reads.
+            # IF FIRST 25 reads unmapped assume ubam. 
+            unmapped_count = 0
+            check_limit = 25
+            
+            for i, read in enumerate(bam):
+                if i >= check_limit:
+                    break
+                if read.is_unmapped:
+                    unmapped_count += 1
+                    
+            if unmapped_count == check_limit:
+                return True
+                
+            return False
+            
+    except Exception as e:
+        print(f"Error reading BAM file {bam_path}: {e}")
+        # attempt alignment if something goes weird
+        return True
+        
+        
+def get_or_create_mmi(rcs_file):
+    """
+    Checks if a Minimap2 index (.mmi) exists for the given reference FASTA.
+    If not, it generates one.
+    
+    Inputs:
+        rcs_file (str): Path to the reference FASTA file.
+    Outputs:
+        mmi_file (str): Path to the Minimap2 index file.
+    """
+    mmi_file = f"{rcs_file}.mmi"
+    
+    if os.path.exists(mmi_file):
+        print(f"Found existing Minimap2 index: {mmi_file}")
+    else:
+        print(f"Minimap2 index not found. Building {mmi_file}...")
+        try:
+            subprocess.run(["minimap2", "-d", mmi_file, rcs_file], check=True)
+            print("Index built successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to build Minimap2 index: {e}")
+            
 def main():
     parser = argparse.ArgumentParser(description="Mitochondrial Variant Database Manager")
     
@@ -707,25 +1059,43 @@ def main():
     # Other important
     parser.add_argument('--outdir', type=str, help='Output directory for logs and temp files')
     parser.add_argument('--db', type=str, required=True, help='Path prefix for the database (e.g., /path/to/my_db) (as input or output)')
-    parser.add_argument('--rcs', type=str, help='Path to reference FASTA (Required for -add, -create, -compare)')
+    parser.add_argument('--rcs', type=str, help='Path to reference FASTA for chrM only (Required for -add, -create, -compare)')
     parser.add_argument('--threshold', type=float, default=0.8, help='Similarity threshold (default: 0.8)')
     
     # main helpers
     parser.add_argument('--csv', type=str, help='Path to the CSV file (Required for -create)')
     parser.add_argument('--bam', type=str, help='Path to the BAM file (Required for -add and -compare)')
     parser.add_argument('--acq', type=str, help='Acquisition ID (Required for -add and -remove) This is the individual sample ID')
-    parser.add_argument('--bank', type=str, help='Bank ID (Required for -add) This is the group ID, which can contain multiple acquisition IDs')
+    parser.add_argument('--pid', type=str, help='personal ID (Required for -add) This is the group ID, which can contain multiple acquisition IDs')
     parser.add_argument('--hist', type=str, default='score_histogram.png', help='Histogram output filename (Used with -checkall)')
     parser.add_argument('--log_file', type=str, default='pairwise_matches_log.txt', help='Name of log file (Used with -checkall)')
     parser.add_argument('--visualize', type=str, default='visualization.png', help='Visualize file matches after comparing (Optional for -compare)')
-    parser.add_argument('--compare_sample', type=str, default = "", help='A specific bank ID to compare a sample to (not just the ones it matches) (Optional for -compare)')
+    parser.add_argument('--compare_sample', type=str, default = "", help='A specific PID to compare a sample to (not just the ones it matches) (Optional for -compare)')
+    parser.add_argument('--vis_putative', action='store_true', help='when checking against the entire database, it will show show a visualization of all the potentially erroneous samples for visual inspection')
+    parser.add_argument('--filter_sample', type=str, default = "", help='when doing compare this allows you to get any putative errors related to a particular sample (sample must be in database already, otherwise put the bam in --bam)')
 
+
+
+    #temp to test levels
+    # global LEVEL, AF_FILTER
+    # parser.add_argument('--af_filter', type=float, default=0.9, help='test')
+    # parser.add_argument('--level', type=str, default=".9", help='test')
+    
+    # args = parser.parse_args()
+    
+    # # assign the parsed values to the globals
+    # LEVEL = args.level
+    # AF_FILTER = args.af_filter
+
+    # print(LEVEL)
+    # print(AF_FILTER)
     args = parser.parse_args()
     db = MitoVariantDatabase()
-
+    if args.rcs:
+        get_or_create_mmi(args.rcs)
     if args.add:
-        if not all([args.bam, args.acq, args.bank, args.rcs, args.outdir, args.db]):
-            print("Error: -add requires --bam, --acq, --bank, --outdir, --db, and --rcs arguments.")
+        if not all([args.bam, args.acq, args.pid, args.rcs, args.outdir, args.db]):
+            print("Error: -add requires --bam, --acq, --pid, --outdir, --db, and --rcs arguments.")
             sys.exit(1)
             
         try:
@@ -734,10 +1104,14 @@ def main():
             print(f"no db loaded, doing default")
 
         print(f"adding {args.bam}")
-        vcf_file = make_vcf(args.bam, args.rcs, args.outdir)
-        if vcf_file:
+        if is_unaligned_bam(args.bam):
+            vcf_file, cov = make_vcf_unaligned_bam(args.bam, args.rcs, args.outdir)
+        else:
+            vcf_file = make_vcf(args.bam, args.rcs, args.outdir)
             cov = get_coverage(args.bam)
-            db.add_sample(vcf_file, args.acq, args.bank, cov)
+        
+        if vcf_file:
+            db.add_sample(vcf_file, args.acq, args.pid, cov)
             db.save(args.db)
             print(f"Added sample {args.acq} to database")
         remove_files(args.outdir)
@@ -775,8 +1149,8 @@ def main():
 
 
     elif args.compare:
-        if not all([args.bam, args.rcs, args.outdir, args.db]):
-            print("Error: -compare requires --bam, --rcs, --outdir, --db arguments.")
+        if not all([args.bam or args.filter_sample, args.rcs, args.outdir, args.db, args.threshold]):
+            print("Error: -compare requires --bam or --filter_sample, --rcs, --outdir, --threshold, --db arguments.")
             sys.exit(1)
             
         try:
@@ -785,21 +1159,39 @@ def main():
             print(f"Error: no database {args.db}")
             sys.exit(1)
         
-        print(f"comparing {args.bam}")
-        vcf_file = make_vcf(args.bam, args.rcs, args.outdir)
-        if vcf_file:
-            print("getting matches")
-            matches = db.compare_sample(vcf_file, threshold=args.threshold)
-            
-            # Use placeholder IDs for the external sample evaluation
-            db.make_output(matches, db, args.bam, "", args.outdir)
-            
-            print("visualization")
-            cov = get_coverage(args.bam)
-            #print(args.compare)
-            outfile = args.outdir + "/" + args.visualize
-            # print(args.compare_sample)
-            db.visualize_sample(vcf_file, outfile = outfile, coverage=cov, threshold=args.threshold, compare = args.compare_sample)
+        if args.filter_sample:
+            #THIS WILL JUST GIVE FOR ALL THE MATCHES. It's honestly impossible to check for only the ones that this sample matches without doing checkall, so why
+            #not just do checkall after every add, and if you want to look for a specific sample just search for the name
+            #This will give you enough, a check on the matches and the supoosed ID given if it's already in the database (which it needs to be)
+            print(f"comparing {args.filter_sample}")
+            db.make_igv_output_putative_compare(args.threshold, args.outdir, args.filter_sample)
+        
+        elif args.bam:
+            print(f"comparing {args.bam}")
+            if is_unaligned_bam(args.bam):
+                vcf_file, cov = make_vcf_unaligned_bam(args.bam, args.rcs, args.outdir)
+            else:
+                vcf_file = make_vcf(args.bam, args.rcs, args.outdir)
+                cov = get_coverage(args.bam)
+                
+            if vcf_file:
+                print("getting matches")
+                matches = db.compare_sample(vcf_file, threshold=args.threshold)
+                
+                # Use placeholder IDs for the external sample evaluation
+                db.make_output(matches, db, args.bam, "", args.outdir)
+                
+                print("visualization")
+                
+                #print(args.compare)
+                outfile = args.outdir + "/" + args.visualize
+                # print(args.compare_sample)
+                
+                #make putative does this now
+                if args.bam:
+                    db.visualize_sample(vcf_file, outfile = outfile, coverage=cov, threshold=args.threshold, compare = args.compare_sample)
+                
+                
             
             print(f"visualization output to {outfile}")
         remove_files(args.outdir)
@@ -816,7 +1208,7 @@ def main():
             sys.exit(1)
             
         print("comparing all samples in database")
-        db.check_all_database(args.outdir, args.hist, args.log_file, args.threshold)
+        db.check_all_database(args.outdir, args.hist, args.log_file, args.threshold, args.vis_putative)
         print("histogram generated and matches logged")
         remove_files(args.outdir)
 
